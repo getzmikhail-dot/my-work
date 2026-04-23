@@ -270,6 +270,14 @@
       .risk-mode-active{background:var(--primary)!important;color:#fff!important;font-weight:600}
       .risk-badge-cell{display:inline-block;padding:2px 9px;border-radius:999px;font-weight:600;font-size:.7rem;letter-spacing:.02em}
       #riskTable td, #riskTable th{vertical-align:middle}
+      .train-spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--surface2);border-top-color:var(--primary);border-radius:50%;animation:train-spin .7s linear infinite;flex-shrink:0}
+      @keyframes train-spin{to{transform:rotate(360deg)}}
+      .train-bar{animation:train-slide 1.6s ease-in-out infinite}
+      @keyframes train-slide{
+        0%{margin-left:-30%;width:30%}
+        50%{margin-left:35%;width:45%}
+        100%{margin-left:100%;width:30%}
+      }
     </style>
 
     <!-- Cohort Comparison -->
@@ -1868,7 +1876,45 @@ function analyzePrepared(rows, src, meta) {
 
 async function trainModelsOnServer(rows) {
   const status = document.getElementById('trainStatus');
-  if (status) status.textContent = 'Идёт обучение моделей на локальном сервере...';
+  const t0 = Date.now();
+  // Рендерим прогресс: спиннер + таймер + indeterminate bar + поэтапные подсказки
+  if (status) {
+    status.innerHTML =
+      '<div style="display:flex;flex-direction:column;gap:8px;max-width:560px">'
+      + '<div style="display:flex;align-items:center;gap:10px">'
+        + '<span class="train-spinner"></span>'
+        + '<strong id="trainPhase" style="color:var(--text)">Обучение моделей на сервере</strong>'
+        + '<span id="trainTimer" style="color:var(--muted);font-size:var(--text-xs);margin-left:auto">0 сек</span>'
+      + '</div>'
+      + '<div style="height:4px;background:var(--surface2);border-radius:2px;overflow:hidden">'
+        + '<div class="train-bar" style="height:100%;width:30%;background:var(--primary);border-radius:2px"></div>'
+      + '</div>'
+      + '<div id="trainHint" style="font-size:var(--text-xs);color:var(--muted)">Подготовка данных…</div>'
+      + '</div>';
+  }
+
+  // Счётчик секунд + поэтапные подсказки (по длительности)
+  const timerEl = document.getElementById('trainTimer');
+  const phaseEl = document.getElementById('trainPhase');
+  const hintEl  = document.getElementById('trainHint');
+  const PHASES = [
+    { at: 0,   phase: 'Обучение моделей',    hint: 'Подготовка данных…' },
+    { at: 3,   phase: 'Обучение моделей',    hint: 'Обучаю Logistic Regression…' },
+    { at: 15,  phase: 'Обучение моделей',    hint: 'Обучаю LightGBM…' },
+    { at: 40,  phase: 'Обучение моделей',    hint: 'Обучаю CatBoost (это самая долгая модель)…' },
+    { at: 80,  phase: 'Обучение моделей',    hint: 'Калибровка вероятностей (CalibratedClassifierCV)…' },
+    { at: 120, phase: 'Почти готово',        hint: 'Финализация метрик… На бесплатном хостинге обучение может занять до 2 минут.' }
+  ];
+  const tick = setInterval(function() {
+    const dt = Math.floor((Date.now() - t0) / 1000);
+    if (timerEl) timerEl.textContent = dt + ' сек';
+    const cur = PHASES.slice().reverse().find(function(p){ return dt >= p.at; });
+    if (cur) {
+      if (phaseEl && phaseEl.textContent !== cur.phase) phaseEl.textContent = cur.phase;
+      if (hintEl  && hintEl.textContent  !== cur.hint)  hintEl.textContent  = cur.hint;
+    }
+  }, 1000);
+
   try {
     const resp = await fetch('/api/train', {
       method: 'POST',
@@ -1878,9 +1924,12 @@ async function trainModelsOnServer(rows) {
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
     const result = await resp.json();
     applyServerTraining(result);
-    if (status) status.textContent = 'Модели обучены на локальном сервере.';
+    clearInterval(tick);
+    const dt = ((Date.now() - t0) / 1000).toFixed(1);
+    if (status) status.innerHTML = '<span style="color:var(--success)">✓</span> Модели обучены за ' + dt + ' сек.';
   } catch (e) {
-    if (status) status.textContent = 'Ошибка обучения: ' + e.message;
+    clearInterval(tick);
+    if (status) status.innerHTML = '<span style="color:#c0392b">✕</span> Ошибка обучения: ' + escHtml(e.message);
   }
 }
 
