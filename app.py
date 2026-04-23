@@ -1,5 +1,6 @@
 import math as _math
 import re
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
@@ -28,9 +29,10 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 @asynccontextmanager
 async def lifespan(_app: 'FastAPI'):
-    # При старте сервера предобучаем модели на synthetic_10000.xlsx, чтобы
-    # после wake-up на бесплатном хостинге What-If/Risk/Predict сразу работали.
-    _autoload_demo()
+    # Автотренировка на synthetic_10000.xlsx идёт в ФОНОВОМ потоке, чтобы lifespan
+    # не блокировал открытие порта. На Render free CPU 0.1 обучение трёх моделей
+    # занимает ~30-60 сек — дольше таймаута port-scan, если блокировать startup.
+    threading.Thread(target=_autoload_demo, daemon=True, name='autoload-demo').start()
     yield
 
 
