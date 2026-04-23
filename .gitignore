@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# CatBoost training artifacts
+catboost_info/
+
+# Excel temp/lock files
+~$*.xlsx
+~$*.xls
+.~lock.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# ── Реальные опросные данные (не публиковать) ──
+dannye_trudoustroystva.xlsx
