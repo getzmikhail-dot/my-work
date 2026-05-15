@@ -21,7 +21,7 @@
 .model-chip{padding:7px 14px;border-radius:999px;font-size:var(--text-xs);font-weight:600;border:1px solid var(--border);background:var(--surface2);color:var(--muted);cursor:pointer;transition:background .15s,color .15s,border-color .15s;min-height:34px}
 .model-chip.active,.model-chip:hover{background:var(--primary);color:#fff;border-color:var(--primary)}
 .prob-gauge{display:flex;flex-direction:column;align-items:center;gap:10px;padding:var(--space-6) var(--space-4)}
-.prob-val{font-size:clamp(2.2rem,5vw,3.5rem);font-weight:700;line-height:1;transition:color .3s}
+.prob-val{font-size:clamp(1.6rem,3vw,2.2rem);font-weight:700;line-height:1.1;transition:color .3s}
 .prob-bar-wrap{width:100%;max-width:260px;height:10px;background:var(--offset2);border-radius:5px;overflow:hidden}
 .prob-bar-fill{height:100%;width:0%;border-radius:5px;transition:width .45s ease,background .3s}
 .prob-label{font-size:var(--text-sm);font-weight:500;transition:color .3s}
@@ -45,7 +45,7 @@
 @media (max-width:900px){
   .wif-grid{grid-template-columns:repeat(auto-fit,minmax(160px,1fr))}
   .prob-gauge{padding:var(--space-4) var(--space-3)}
-  .prob-val{font-size:2.2rem}
+  .prob-val{font-size:1.6rem}
 }
 @media (max-width:640px){
   .ov-stats{grid-template-columns:repeat(2,1fr)}
@@ -224,11 +224,24 @@
         </div>
         <div class="card">
           <div class="prob-gauge" id="probGauge">
-            <div style="font-size:var(--text-xs);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Вероятность трудоустройства по специальности</div>
+            <div style="font-size:var(--text-xs);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Вероятность трудоустройства</div>
             <div class="prob-val" id="probValue" style="color:var(--muted)">—</div>
             <div class="prob-bar-wrap"><div class="prob-bar-fill" id="probBarFill"></div></div>
             <div class="prob-label" id="probLabel" style="color:var(--muted)">Заполните форму и нажмите «Рассчитать»</div>
             <div id="probBreakdown"></div>
+            <div id="shapSection" style="display:none;margin-top:18px">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:8px">
+                <div class="eyebrow" id="explainHeader">Вклад признаков в прогноз (SHAP)</div>
+                <span id="explainBaseBadge" style="display:inline-block;padding:2px 9px;border-radius:999px;font-size:.68rem;letter-spacing:.03em;background:color-mix(in srgb,var(--muted) 14%,transparent);color:var(--muted)"></span>
+                <div style="margin-left:auto;display:inline-flex;gap:6px">
+                  <button type="button" class="sheet-chip active" id="explainMethShap" onclick="switchExplainMethod('shap')">SHAP</button>
+                  <button type="button" class="sheet-chip" id="explainMethLime" onclick="switchExplainMethod('lime')">LIME</button>
+                </div>
+              </div>
+              <div class="cw" style="height:170px"><canvas id="cShap"></canvas></div>
+              <div id="explainSummary" style="margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:14px;font-size:var(--text-xs)"></div>
+              <div id="shapBase" style="margin-top:8px;font-size:var(--text-xs);color:var(--muted)"></div>
+            </div>
           </div>
           <div id="vacancySection" style="display:none" class="vac-section">
             <div class="eyebrow" style="margin-bottom:10px">Вакансии на рынке труда</div>
@@ -257,6 +270,7 @@
           <input type="checkbox" id="riskHideEmpty" checked> Скрывать пустые анкеты
         </label>
         <button class="btn btn-s btn-sm" id="riskBtn" onclick="loadRiskGroups()" disabled>Найти группу риска</button>
+        <button class="btn btn-s btn-sm" id="riskExportBtn" onclick="exportRiskGroups()" disabled title="Скачать текущую выборку групп риска в формате Excel">Скачать .xlsx</button>
       </div>
       <div id="riskSummary" style="color:var(--muted);font-size:var(--text-sm);margin-bottom:12px">Загрузите файл и обучите модели</div>
       <div class="twrap" style="max-height:420px">
@@ -474,7 +488,8 @@ function renderEmptyCharts() {
     type:'bar',
     data:{ labels:['Загрузите файл'], datasets:[
       { label:'По специальности', data:[0], backgroundColor:p, stack:'dir' },
-      { label:'Не по специальности', data:[0], backgroundColor:a, stack:'dir' }
+      { label:'Не по специальности', data:[0], backgroundColor:a, stack:'dir' },
+      { label:'Не трудоустроены', data:[0], backgroundColor:'#c0392b', stack:'dir' }
     ]},
     options:{ indexAxis:'y', responsive:true, maintainAspectRatio:false, animation:false,
       plugins:{ legend:{ position:'bottom' }, tooltip:{ enabled:false } },
@@ -512,7 +527,7 @@ function renderDashboardCharts(data) {
     options:{ responsive:true, maintainAspectRatio:false, animation:false,
       plugins:{
         legend:{ display:true, position:'bottom', labels:{ boxWidth:12, padding:8 } },
-        subtitle:{ display:true, text:'% выпускников, трудоустроенных по специальности', color:muted(), font:{ size:11 }, padding:{ bottom:6 } },
+        subtitle:{ display:true, text:'% трудоустроенных выпускников (от всех)', color:muted(), font:{ size:11 }, padding:{ bottom:6 } },
         tooltip:{ callbacks:{ label:function(ctx){
           if (ctx.datasetIndex===1) return 'Среднее: '+Number(ctx.raw).toFixed(1)+'%';
           var n = data.level.counts && data.level.counts[ctx.dataIndex];
@@ -571,17 +586,23 @@ function buildDirChart(canvasEl, dirData) {
     values:        idx.map(function(i) { return dirData.values[i]; }),
     counts:        idx.map(function(i) { return dirData.counts[i]; }),
     specCounts:    idx.map(function(i) { return dirData.specCounts[i]; }),
-    notSpecCounts: idx.map(function(i) { return dirData.notSpecCounts[i]; })
+    notSpecCounts: idx.map(function(i) { return dirData.notSpecCounts[i]; }),
+    unempCounts:   idx.map(function(i) { return (dirData.unempCounts || [])[i] || 0; })
   };
 
-  // Короткие метки для оси (полное название — в тултипе)
+  // Подписи направлений: компактный ФГОС-код (без последних двух цифр) +
+  // название. Без кода невозможно отличить «09.03.03 Прикл. информатика»
+  // от «09.04.03 Прикл. информатика» (бакалавр vs магистр).
   var shortLabels = d.labels.map(function(l) {
-    var clean = l.replace(/^\d{2}\.\d{2}\.\d{2,3}\s*/, ''); // убрать "09.03.04 "
-    return clean.length > 44 ? clean.slice(0, 42) + '…' : clean;
+    var m = l.match(/^(\d{2}\.\d{2}\.\d{2,3})\s*(.+)$/);
+    if (!m) return l.length > 50 ? l.slice(0, 48) + '…' : l;
+    var code = m[1], name = m[2];
+    var compact = code + ' ' + name;
+    return compact.length > 50 ? compact.slice(0, 48) + '…' : compact;
   });
 
   var subtitleText = dirSortMode === 'pct'
-    ? 'Топ-15 направлений — сортировка по наибольшему % трудоустройства по специальности'
+    ? 'Топ-15 направлений — сортировка по наибольшему % трудоустройства по специальности (от всех)'
     : 'Топ-15 направлений — сортировка по числу выпускников';
 
   return new Chart(canvasEl, {
@@ -604,6 +625,15 @@ function buildDirChart(canvasEl, dirData) {
             return d.counts[i] ? +(ns / d.counts[i] * 100).toFixed(1) : 0;
           }),
           backgroundColor: a,
+          borderSkipped: false,
+          stack: 'dir'
+        },
+        {
+          label: 'Не трудоустроены',
+          data: d.unempCounts.map(function(u, i) {
+            return d.counts[i] ? +(u / d.counts[i] * 100).toFixed(1) : 0;
+          }),
+          backgroundColor: '#c0392b',
           borderSkipped: false,
           stack: 'dir'
         }
@@ -634,15 +664,17 @@ function buildDirChart(canvasEl, dirData) {
               return lines;
             },
             label: function(ctx) {
-              var i     = ctx.dataIndex;
-              var total = d.counts[i];
-              var spec  = d.specCounts[i];
+              var i      = ctx.dataIndex;
+              var total  = d.counts[i];
+              var spec   = d.specCounts[i];
               var notSpec = d.notSpecCounts[i];
-              var specPct    = total ? (spec    / total * 100).toFixed(1) : '0.0';
-              var notSpecPct = total ? (notSpec / total * 100).toFixed(1) : '0.0';
+              var unemp  = d.unempCounts[i];
+              function pct(v) { return total ? (v / total * 100).toFixed(1) : '0.0'; }
               if (ctx.datasetIndex === 0)
-                return '  По специальности: ' + specPct + '% (' + spec + ' чел.)';
-              return '  Не по специальности: ' + notSpecPct + '% (' + notSpec + ' чел.)';
+                return '  По специальности: ' + pct(spec) + '% (' + spec + ' чел.)';
+              if (ctx.datasetIndex === 1)
+                return '  Не по специальности: ' + pct(notSpec) + '% (' + notSpec + ' чел.)';
+              return '  Не трудоустроены: ' + pct(unemp) + '% (' + unemp + ' чел.)';
             },
             footer: function(items) {
               return 'Всего по направлению: ' + d.counts[items[0].dataIndex] + ' чел.';
@@ -709,10 +741,14 @@ function renderGeoCharts(data) {
     }
   });
 
-  // Chart 2 — фильтруем нули, оставляем только где есть трудоустроенные по специальности
+  // Chart 2 — отдельный топ-N по числу трудоустроенных по специальности.
+  // Фильтруем нули и пересортировываем (раньше унаследовался порядок по total
+  // из chart 1, и столбцы шли по убыванию total, что для второго графика
+  // выглядело хаотично — Тверская обл. с 1 спецом стояла раньше СПб с 0).
   var geo2pairs = geo.labels.map(function(l, i) {
     return { label: l, specialty: geo.specialty[i], total: geo.total[i] };
-  }).filter(function(x) { return x.specialty > 0; });
+  }).filter(function(x) { return x.specialty > 0; })
+    .sort(function(a, b) { return b.specialty - a.specialty; });
 
   // Динамический заголовок блока
   var geo2Title = document.getElementById('geo2Title');
@@ -788,11 +824,20 @@ function getSchemaColumns(headers) {
   };
 }
 
+// target из ingest приходит в тернарной схеме:
+//   0 = не трудоустроен  → null   (фронт: «Не трудоустроены»)
+//   1 = трудоустр. не по спец → 0  (фронт: «Не по специальности»)
+//   2 = трудоустр. по спец    → 1  (фронт: «По специальности»)
+// Старые форматы (да/нет, true/false) поддержаны для обратной совместимости
+// с произвольными xlsx, которые пользователь грузит вручную.
 function toBinary(v) {
   var s = normalizeKey(v);
   if (!s) return null;
-  if (['1','true','yes','да','д'].indexOf(s) !== -1) return 1;
-  if (['0','false','no','нет','н'].indexOf(s) !== -1) return 0;
+  if (s === '2') return 1;
+  if (s === '1') return 0;
+  if (s === '0') return null;
+  if (['true','yes','да','д'].indexOf(s) !== -1) return 1;
+  if (['false','no','нет','н'].indexOf(s) !== -1) return 0;
   if (s.indexOf('да') === 0) return 1;
   if (s.indexOf('нет') === 0) return 0;
   return null;
@@ -1266,12 +1311,14 @@ function computeFeatureImportance(items) {
     });
     return Number(weighted.toFixed(4));
   }
+  // `job` исключена намеренно: target «по специальности» рассчитывается через
+  // _is_job_relevant(job, direction) на бэке, т.е. сама должность — это и есть
+  // источник метки. Включать её как фактор — тавтология (всегда будет №1).
   return [
     { label: 'Уровень обр.', value: score(function(x){ return x.level; }) },
     { label: 'Направление', value: score(function(x){ return x.direction; }) },
     { label: 'Регион', value: score(function(x){ return x.region; }) },
-    { label: 'Город', value: score(function(x){ return x.city; }) },
-    { label: 'Должность', value: score(function(x){ return x.job; }) }
+    { label: 'Город', value: score(function(x){ return x.city; }) }
   ];
 }
 
@@ -1498,17 +1545,28 @@ function deriveDashboardData(rows) {
   var items = rawItems.filter(function(x){ return x.target === 0 || x.target === 1; });
   if (!items.length) return null;
 
+  // Группировка по ключу с расчётом «% трудоустроенных от всех» (включая
+  // безработных): берём rawItems, чтобы знаменатель был полный. Это показывает
+  // реальную дифференциацию по уровням образования (магистры устраиваются
+  // чаще бакалавров), а не пропорцию «по спец vs не по спец» среди работающих
+  // (которая обычно одинакова между уровнями).
   function groupedRate(key, limit) {
     var groups = {};
-    items.forEach(function(item){
+    rawItems.forEach(function(item){
       var k = item[key] || 'Не указано';
       if (k === 'Не указано') return;
-      if (!groups[k]) groups[k] = [];
-      groups[k].push(item);
+      if (!groups[k]) groups[k] = { total: 0, employed: 0 };
+      groups[k].total++;
+      if (item.target === 0 || item.target === 1) groups[k].employed++;
     });
     var entries = Object.keys(groups).map(function(k){
-      return { label: k, value: employmentRate(groups[k]), count: groups[k].length };
-    }).sort(function(a,b){ return b.count - a.count; });
+      var g = groups[k];
+      return {
+        label: k,
+        value: g.total ? Number((g.employed / g.total * 100).toFixed(1)) : 0,
+        count: g.total,
+      };
+    }).sort(function(a,b){ return b.value - a.value; });   // по убыванию % трудоустройства
     if (limit) entries = entries.slice(0, limit);
     return {
       labels: entries.map(function(x){ return x.label; }),
@@ -1526,9 +1584,16 @@ function deriveDashboardData(rows) {
       groups[k].total++;
       if (item.target === 1) groups[k].specialty++;
     });
-    var entries = Object.keys(groups).map(function(k){
+    // Отсекаем «хвост» дважды:
+    //   а) абсолютный минимум 3 чел. — иначе одиночные записи мусорят;
+    //   б) относительный порог 2% от максимума — иначе при МО=1050 регионы
+    //      с 3-10 студентами рисуются почти невидимыми столбцами рядом с МО.
+    var allEntries = Object.keys(groups).map(function(k){
       return { label: k, total: groups[k].total, specialty: groups[k].specialty };
     }).sort(function(a,b){ return b.total - a.total; });
+    var maxTotal = allEntries.length ? allEntries[0].total : 0;
+    var minByRatio = Math.max(3, Math.ceil(maxTotal * 0.02));
+    var entries = allEntries.filter(function(x){ return x.total >= minByRatio; });
     if (limit) entries = entries.slice(0, limit);
     return {
       labels: entries.map(function(x){ return x.label; }),
@@ -1540,28 +1605,41 @@ function deriveDashboardData(rows) {
   var level = groupedRate('level', 10);
   var region = groupedRate('region', 10);
 
-  // Направления: точные счётчики по специальности / не по специальности
+  // Направления: полный 3-классовый расклад от ВСЕХ студентов направления
+  // (включая безработных), не только от трудоустроенных. Иначе график искажает
+  // картину: направление с 10% трудоустройства и 90% безработицей показывало
+  // бы 100% бар без всякого упоминания о безработных.
   var dir = (function() {
     var groups = {};
-    items.forEach(function(item) {
+    rawItems.forEach(function(item) {
       var k = item.direction || 'Не указано';
       if (k === 'Не указано') return;
-      if (!groups[k]) groups[k] = [];
-      groups[k].push(item);
+      if (!groups[k]) groups[k] = { all: [] };
+      groups[k].all.push(item);
     });
     var entries = Object.keys(groups).map(function(k) {
-      var grp = groups[k];
-      var spec    = grp.filter(function(x) { return x.target === 1; }).length;
-      var notSpec = grp.length - spec;
-      return { label: k, count: grp.length, specCount: spec, notSpecCount: notSpec,
-               value: grp.length ? +(spec / grp.length * 100).toFixed(1) : 0 };
+      var all = groups[k].all;
+      var spec    = all.filter(function(x) { return x.target === 1; }).length;   // по спец
+      var notSpec = all.filter(function(x) { return x.target === 0; }).length;   // не по спец
+      var unemp   = all.filter(function(x) { return x.target === null; }).length;
+      var total = all.length;
+      return {
+        label: k,
+        count: total,
+        specCount: spec,
+        notSpecCount: notSpec,
+        unempCount: unemp,
+        // value = % по специальности от ВСЕХ (для сортировки по «По % трудоустройства»)
+        value: total ? +(spec / total * 100).toFixed(1) : 0
+      };
     }).sort(function(a, b) { return b.count - a.count; }).slice(0, 15);
     return {
       labels:       entries.map(function(x) { return x.label; }),
       values:       entries.map(function(x) { return x.value; }),
       counts:       entries.map(function(x) { return x.count; }),
       specCounts:   entries.map(function(x) { return x.specCount; }),
-      notSpecCounts:entries.map(function(x) { return x.notSpecCount; })
+      notSpecCounts:entries.map(function(x) { return x.notSpecCount; }),
+      unempCounts:  entries.map(function(x) { return x.unempCount; })
     };
   })();
   var cityMap = {};
@@ -1609,10 +1687,19 @@ function deriveDashboardData(rows) {
   var riskByLevel = classBuckets('level').sort(function(a, b){ return b.total - a.total; });
   var riskByDirection = classBuckets('direction', 3).sort(function(a, b){ return b.riskPct - a.riskPct; }).slice(0, 12);
 
+  // Общий KPI «% трудоустроенных» — от всех выпускников (включая безработных),
+  // чтобы цифра в overview согласовывалась с подписью графика «По уровню
+  // образования».
+  var totalRows = rawItems.length;
+  var employedRows = rawItems.filter(function(x){ return x.target === 0 || x.target === 1; }).length;
+  var overallEmpRate = totalRows ? Number((employedRows / totalRows * 100).toFixed(1)) : 0;
+
   return {
     kpi: {
-      rows: items.length,
-      employedRate: employmentRate(items),
+      // rows = все строки из 4 файлов (включая безработных), а не только
+      // трудоустроенные — иначе подпись «ЗАПИСЕЙ» путала пользователя.
+      rows: totalRows,
+      employedRate: overallEmpRate,
       regions: uniqueRegions,
       directions: uniqueDirs
     },
@@ -1691,7 +1778,7 @@ function rebuildDashboardCharts(data) {
     options:{ responsive:true, maintainAspectRatio:false,
       plugins:{
         legend:{ display:true, position:'bottom', labels:{ boxWidth:12, padding:8 } },
-        subtitle:{ display:true, text:'% выпускников, трудоустроенных по специальности', color:muted(), font:{ size:11 }, padding:{ bottom:6 } },
+        subtitle:{ display:true, text:'% трудоустроенных выпускников (от всех)', color:muted(), font:{ size:11 }, padding:{ bottom:6 } },
         tooltip:{ callbacks:{ label:function(ctx){
           if (ctx.datasetIndex===1) return 'Среднее: '+Number(ctx.raw).toFixed(1)+'%';
           var n = data.level.counts && data.level.counts[ctx.dataIndex];
@@ -1978,6 +2065,8 @@ function applyServerTraining(result) {
   // Enable risk groups button
   var riskBtn = document.getElementById('riskBtn');
   if (riskBtn) riskBtn.disabled = false;
+  var riskExportBtn = document.getElementById('riskExportBtn');
+  if (riskExportBtn) riskExportBtn.disabled = false;
 }
 
 // ── Model switcher ──────────────────────────────────────────────
@@ -2143,8 +2232,17 @@ function buildWhatIfForm(featureCols, uniqueVals, models, bestModel, dirByLevel,
 
   ignoredCols.add('job'); // должность используется для анализа вакансий, не в форме
 
+  // В форме показываем только профильные поля выпускника + регион поиска вакансий.
+  // Остальные feature-колонки (year, organization, и т.п.) автоматически
+  // игнорируются — бэк подставляет median/default через _unique_vals.
+  var FORM_VISIBLE = { education_level: 1, direction: 1, region: 1, city: 1 };
+  featureCols.forEach(function(col) {
+    if (!FORM_VISIBLE[col] && col !== 'job') ignoredCols.add(col);
+  });
+
   var html = featureCols.map(function(col) {
     if (col === 'job') return ''; // убрано из формы — анализируется через вакансии HH.ru
+    if (!FORM_VISIBLE[col]) return ''; // скрыто из формы, добавлено в ignoredCols выше
     var label = COL_LABELS[col] || col;
     var uv = uniqueVals[col];
 
@@ -2199,6 +2297,11 @@ function buildWhatIfForm(featureCols, uniqueVals, models, bestModel, dirByLevel,
   var cityComboInst = null;
   var allCitiesItems = [];
 
+  // Разумные дефолты по контексту университета «Дубна» (ИСАУ).
+  // Раньше брался uv[0] из данных — туда попадали грязные значения вроде
+  // «Алматы» (1 запись из казахстанского магистранта) и подобные выбросы.
+  var PREF_DEFAULT = { region: 'МО', city: 'Дубна' };
+
   featureCols.forEach(function(col) {
     var uv = uniqueVals[col];
     if (uv && typeof uv === 'object' && 'median' in uv) return;
@@ -2216,7 +2319,14 @@ function buildWhatIfForm(featureCols, uniqueVals, models, bestModel, dirByLevel,
 
     var inp = document.getElementById('wif_' + col);
     if (inp) {
-      var def = Array.isArray(uv) && uv.length ? String(uv[0]) : items[0];
+      var def;
+      if (PREF_DEFAULT[col] && items.indexOf(PREF_DEFAULT[col]) !== -1) {
+        def = PREF_DEFAULT[col];
+      } else if (Array.isArray(uv) && uv.length && items.indexOf(String(uv[0])) !== -1) {
+        def = String(uv[0]);
+      } else {
+        def = items[0];
+      }
       inp.value = def || '';
     }
   });
@@ -2305,6 +2415,11 @@ var _lastVacancyData = null;
 
 function fetchVacancies() {
   clearTimeout(_vacTimer);
+  // Сразу сбрасываем устаревшие данные, чтобы между сменой направления и
+  // получением свежего ответа runPredict не использовал старый total_hh_count
+  // от предыдущего направления — иначе market_factor показывает +15% для
+  // направления, где на самом деле 4 вакансии.
+  _lastVacancyData = null;
   _vacTimer = setTimeout(function() {
     var dirEl  = document.getElementById('wif_direction');
     var regEl  = document.getElementById('wif_region');
@@ -2362,12 +2477,12 @@ function showVacancyResult(data) {
         + '<span style="font-size:var(--text-xs);color:var(--muted)"> трудоустроено</span>'
         + '</div>';
 
-  // Trudvsem
+  // HH.ru (парсинг публичной страницы поиска hh.ru/search/vacancy)
   var hhColor = hhAvail ? (hh > 100 ? 'var(--success)' : hh > 0 ? 'var(--accent)' : 'var(--muted)') : 'var(--muted)';
   html += '<div style="background:var(--surface2);border:1px solid var(--border);border-radius:var(--r-md);padding:9px 12px">'
         + '<div style="font-size:.68rem;letter-spacing:.05em;text-transform:uppercase;color:var(--muted);margin-bottom:3px">Вакансий на рынке</div>'
         + '<strong style="font-size:1.3rem;color:' + hhColor + '">' + (hhAvail ? hh.toLocaleString('ru') : '—') + '</strong>'
-        + '<span style="font-size:var(--text-xs);color:var(--muted)"> (Trudvsem.ru)</span>'
+        + '<span style="font-size:var(--text-xs);color:var(--muted)"> (HH.ru)</span>'
         + '</div>';
 
   html += '</div>';
@@ -2406,6 +2521,172 @@ function showVacancyResult(data) {
   content.innerHTML = html;
 }
 
+// ── Локальные объяснения: SHAP / LIME ────────────────────────────
+var _shapChart = null;
+var _explainData = { shap: null, lime: null };
+var _explainMethod = 'shap';   // 'shap' | 'lime'
+var _SHAP_DISPLAY_LABELS = {
+  'education_level': 'Уровень образования',
+  'direction': 'Направление',
+  'region': 'Регион',
+  'city': 'Город',
+};
+
+function _explainMethodAvailable(m) {
+  var d = _explainData[m];
+  return d && Array.isArray(d.features) && d.features.length > 0;
+}
+
+function switchExplainMethod(m) {
+  if (!_explainMethodAvailable(m)) return;
+  _explainMethod = m;
+  var btnShap = document.getElementById('explainMethShap');
+  var btnLime = document.getElementById('explainMethLime');
+  if (btnShap) btnShap.classList.toggle('active', m === 'shap');
+  if (btnLime) btnLime.classList.toggle('active', m === 'lime');
+  var hdr = document.getElementById('explainHeader');
+  if (hdr) hdr.textContent = 'Вклад признаков в прогноз (' + (m === 'shap' ? 'SHAP' : 'LIME') + ')';
+  _drawExplain(_explainData[m], m);
+}
+
+function _drawExplain(data, methodName) {
+  var ctx = document.getElementById('cShap');
+  if (!ctx) return;
+  if (_shapChart) { _shapChart.destroy(); _shapChart = null; }
+  if (!data || !Array.isArray(data.features) || data.features.length === 0) return;
+  var valueKey = (methodName === 'lime') ? 'lime' : 'shap';
+  var top = data.features.slice(0, 6);
+  // Краткие подписи на оси Y (без значений признака — они уйдут в сводку ниже)
+  var labels = top.map(function(f) {
+    return _SHAP_DISPLAY_LABELS[f.name] || f.name;
+  });
+  var values = top.map(function(f) { return Math.round((f[valueKey] || 0) * 1000) / 10; });
+  var fullValues = top.map(function(f) { return String(f.feature_value || ''); });
+  var colors = values.map(function(v) {
+    return v >= 0 ? 'rgba(46, 125, 87, 0.85)' : 'rgba(192, 57, 43, 0.85)';
+  });
+  _shapChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: labels,
+      datasets: [{
+        label: 'Вклад в P(spec), процентные пункты',
+        data: values,
+        backgroundColor: colors,
+        borderColor: colors,
+        borderWidth: 1,
+        barThickness: 18,
+        maxBarThickness: 22,
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            title: function(items) {
+              if (!items || !items.length) return '';
+              var i = items[0].dataIndex;
+              return labels[i] + (fullValues[i] ? ': ' + fullValues[i] : '');
+            },
+            label: function(ctx) {
+              var v = ctx.parsed.x;
+              var sign = v >= 0 ? '+' : '';
+              return sign + v.toFixed(1) + ' п.п. к P(спец.)';
+            },
+          },
+        },
+      },
+      scales: {
+        x: {
+          ticks: { callback: function(v) { return (v >= 0 ? '+' : '') + v + '%'; } },
+          grid: { color: 'rgba(128,128,128,0.15)' },
+        },
+        y: {
+          grid: { display: false },
+          ticks: { font: { size: 11 } },
+        },
+      },
+      layout: { padding: { left: 4, right: 4 } },
+    },
+  });
+
+  // Бейдж с базовой вероятностью рядом с заголовком
+  var badge = document.getElementById('explainBaseBadge');
+  if (badge) {
+    var basePct = Math.round(data.base * 1000) / 10;
+    badge.textContent = (methodName === 'shap' ? 'база: ' : 'intercept: ') + basePct.toFixed(1) + '%';
+  }
+
+  // Сводка под графиком: топ-3 повышающих и понижающих фактора
+  var summary = document.getElementById('explainSummary');
+  if (summary) {
+    var positives = data.features.filter(function(f) { return (f[valueKey] || 0) > 0; })
+                                  .slice(0, 3);
+    var negatives = data.features.filter(function(f) { return (f[valueKey] || 0) < 0; })
+                                  .slice(0, 3);
+    function pillsHtml(arr, sign, color) {
+      if (!arr.length) return '<span style="color:var(--muted)">—</span>';
+      return arr.map(function(f) {
+        var name = _SHAP_DISPLAY_LABELS[f.name] || f.name;
+        var val = String(f.feature_value || '');
+        var pp = Math.round((f[valueKey] || 0) * 1000) / 10;
+        var tag = '<strong style="color:' + color + '">' + sign + pp.toFixed(1) + '%</strong>';
+        return '<div style="margin-bottom:3px;line-height:1.35"><span style="color:var(--muted)">' + name + ':</span> '
+             + (val ? '<span title="' + val.replace(/"/g, '&quot;') + '">' + val + '</span>' : '—')
+             + ' &nbsp;' + tag + '</div>';
+      }).join('');
+    }
+    summary.innerHTML =
+      '<div><div class="eyebrow" style="margin-bottom:6px;color:#2e7d57">Повышают прогноз</div>'
+        + pillsHtml(positives, '+', '#2e7d57') + '</div>'
+      + '<div><div class="eyebrow" style="margin-bottom:6px;color:#c0392b">Понижают прогноз</div>'
+        + pillsHtml(negatives, '−', '#c0392b') + '</div>';
+  }
+
+  // Поясняющая подпись внизу
+  var baseEl = document.getElementById('shapBase');
+  if (baseEl) {
+    baseEl.textContent = (methodName === 'shap'
+      ? 'SHAP-значения рассчитаны KernelExplainer на фоновой выборке из 20 строк. '
+      : 'LIME-значения — интерсепт + веса локальной линейной модели вокруг точки прогноза. ')
+      + 'Зелёные столбцы повышают прогноз, красные понижают; наведите курсор на столбец, чтобы увидеть значение признака полностью.';
+  }
+}
+
+// Совместимая обёртка: вызывается из runPredict, принимает оба объяснения.
+function renderShapWaterfall(shapData, limeData) {
+  _explainData.shap = shapData || null;
+  _explainData.lime = (typeof limeData !== 'undefined') ? (limeData || null) : null;
+  var section = document.getElementById('shapSection');
+  if (!section) return;
+  var hasShap = _explainMethodAvailable('shap');
+  var hasLime = _explainMethodAvailable('lime');
+  if (!hasShap && !hasLime) {
+    section.style.display = 'none';
+    if (_shapChart) { _shapChart.destroy(); _shapChart = null; }
+    return;
+  }
+  section.style.display = '';
+  // Обновляем доступность кнопок
+  var btnShap = document.getElementById('explainMethShap');
+  var btnLime = document.getElementById('explainMethLime');
+  if (btnShap) btnShap.disabled = !hasShap;
+  if (btnLime) btnLime.disabled = !hasLime;
+  // Если текущий метод недоступен — переключаемся на доступный
+  if (!_explainMethodAvailable(_explainMethod)) {
+    _explainMethod = hasShap ? 'shap' : 'lime';
+  }
+  if (btnShap) btnShap.classList.toggle('active', _explainMethod === 'shap');
+  if (btnLime) btnLime.classList.toggle('active', _explainMethod === 'lime');
+  var hdr = document.getElementById('explainHeader');
+  if (hdr) hdr.textContent = 'Вклад признаков в прогноз (' + (_explainMethod === 'shap' ? 'SHAP' : 'LIME') + ')';
+  _drawExplain(_explainData[_explainMethod], _explainMethod);
+}
+
 async function runPredict() {
   if (!wifMeta) return;
   var btn = document.getElementById('predictBtn');
@@ -2419,8 +2700,15 @@ async function runPredict() {
   });
   var modelName = document.getElementById('predictModelSel').value;
 
+  function probTier(pct) {
+    if (pct === null) return '—';
+    if (pct >= 70) return 'Высокий шанс';
+    if (pct >= 30) return 'Средний шанс';
+    return 'Низкий шанс';
+  }
+
   function setProbUI(pct, color, labelText) {
-    document.getElementById('probValue').textContent = pct !== null ? pct + '%' : '—';
+    document.getElementById('probValue').textContent = probTier(pct);
     document.getElementById('probValue').style.color = color;
     document.getElementById('probBarFill').style.width = pct !== null ? pct + '%' : '0%';
     document.getElementById('probBarFill').style.background = color;
@@ -2448,22 +2736,18 @@ async function runPredict() {
 
     if (data.error) { setProbUI(null, 'var(--muted)', 'Ошибка: ' + data.error); return; }
 
-    if (data.coverage === 0) {
-      setProbUI(null, 'var(--muted)',
-        'Нет данных: в загруженной выборке не нашлось выпускников с такими параметрами. Измените значения или отметьте часть полей как «не учитывать».');
-      return;
-    }
-
-    // Итоговая вероятность работы по специальности (с учётом сглаживания и множителя рынка)
+    // В исходных файлах ИСАУ нет признака «по специальности» — только бинарный
+    // факт трудоустройства. Поэтому показываем именно вероятность найти работу
+    // (probability_employed уже учитывает байесовское сглаживание и множитель рынка).
     var specProb = (typeof data.probability === 'number') ? data.probability : 0;
     var empProb  = (typeof data.probability_employed === 'number') ? data.probability_employed : specProb;
     var spcGivenEmp = (typeof data.probability_spec_given_employed === 'number')
       ? data.probability_spec_given_employed : (empProb > 0 ? specProb / empProb : 0);
 
-    var pct = Math.round(specProb * 100);
-    var color = pct >= 70 ? 'var(--success)' : pct >= 40 ? 'var(--accent)' : '#c0392b';
-    var labelText = pct >= 70 ? 'Хорошие шансы трудоустройства по специальности'
-                  : pct >= 40 ? 'Умеренный риск — рекомендуется поддержка'
+    var pct = Math.round(empProb * 100);
+    var color = pct >= 70 ? 'var(--success)' : pct >= 30 ? 'var(--accent)' : '#c0392b';
+    var labelText = pct >= 70 ? 'Хорошие шансы трудоустройства'
+                  : pct >= 30 ? 'Умеренный риск — рекомендуется поддержка'
                               : 'Высокий риск — поддержка необходима';
     setProbUI(pct, color, labelText);
 
@@ -2493,14 +2777,11 @@ async function runPredict() {
     }
 
     var empPct = Math.round(empProb * 100);
-    var spcGivenEmpPct = Math.round(spcGivenEmp * 100);
     var sep = '<span style="color:var(--border);margin:0 2px">·</span>';
 
     var html = ''
       + '<div style="display:flex;gap:8px;justify-content:center;margin-top:10px;font-size:var(--text-xs);color:var(--muted);flex-wrap:wrap">'
         + '<span title="Шанс найти работу (любую) после выпуска">Найдёт работу: <strong style="color:var(--text)">' + empPct + '%</strong></span>'
-        + sep
-        + '<span title="Из тех, кто устроился — какая доля работает по специальности">Из них по спец.: <strong style="color:var(--text)">' + spcGivenEmpPct + '%</strong></span>'
         + (marketTxt ? sep + marketTxt : '')
       + '</div>'
       + '<div style="text-align:center;margin-top:6px">'
@@ -2508,13 +2789,16 @@ async function runPredict() {
         + 'background:color-mix(in srgb,' + relColor + ' 14%,transparent);color:' + relColor + '">'
         + relTxt
         + '</span>';
-    if (covEmp > 0 || covSpec > 0) {
+    if (covEmp > 0) {
       html += '<div style="font-size:.68rem;color:var(--muted);margin-top:4px">'
-            + 'В выборке: трудоустроено ' + covEmp + ', по спец. ' + covSpec
+            + 'В выборке трудоустроено: ' + covEmp
             + '</div>';
     }
     html += '</div>';
     bd.innerHTML = html;
+
+    // Локальные объяснения SHAP/LIME: вклад каждого признака в P(y=2)
+    renderShapWaterfall(data.shap, data.lime);
   } catch(e) {
     setProbUI(null, 'var(--muted)', 'Ошибка соединения: ' + e.message);
   } finally {
@@ -2533,12 +2817,17 @@ function setRiskMode(mode) {
   loadRiskGroups();
 }
 
+// Бейдж шанса трудоустройства — те же пороги, что в What-If-блоке:
+//   ≥70%  — высокий шанс (зелёный)
+//   30-69 — средний шанс (оранжевый)
+//   <30   — низкий шанс  (красный)
+// Раньше метки шли по «уровню риска» (низкий риск=хорошо), что противоречило
+// названию колонки «Прогноз трудоустройства» (низкий=плохо).
 function _riskBadge(pct) {
   var label, color;
-  if (pct < 25)      { label = 'критический'; color = '#c0392b'; }
-  else if (pct < 45) { label = 'высокий';     color = '#e67e22'; }
-  else if (pct < 60) { label = 'средний';     color = 'var(--accent)'; }
-  else               { label = 'низкий';      color = 'var(--success)'; }
+  if (pct >= 70)      { label = 'высокий шанс';  color = 'var(--success)'; }
+  else if (pct >= 30) { label = 'средний шанс';  color = 'var(--accent)'; }
+  else                { label = 'низкий шанс';   color = '#c0392b'; }
   return '<span class="risk-badge-cell" style="background:color-mix(in srgb,' + color + ' 16%,transparent);color:' + color + '">'
        + label + ' · ' + pct + '%</span>';
 }
@@ -2546,7 +2835,7 @@ function _riskBadge(pct) {
 function _renderRiskIndividual(records) {
   var thead = document.getElementById('riskTableHead');
   var tbody = document.getElementById('riskTableBody');
-  var headers = ['Уровень', 'Направление', 'Регион', 'Город', 'Должности', 'Студентов', 'Шанс по специальности'];
+  var headers = ['Уровень', 'Направление', 'Регион', 'Город', 'Должности', 'Студентов', 'Шанс трудоустройства'];
   thead.innerHTML = headers.map(function(h){ return '<th>' + escHtml(h) + '</th>'; }).join('');
   tbody.innerHTML = records.map(function(r){
     var pct = Math.round((r.probability || 0) * 100);
@@ -2565,25 +2854,74 @@ function _renderRiskIndividual(records) {
 function _renderRiskGroup(records) {
   var thead = document.getElementById('riskTableHead');
   var tbody = document.getElementById('riskTableBody');
-  var headers = ['Направление', 'Уровень', 'Студентов', 'Факт. трудоустройство', 'Факт. по специальности', 'Прогноз по специальности'];
+  // «По специальности» — эвристика: должность из колонки `job` матчится
+  // ключевым словам направления (см. _is_job_relevant на бэке). Сумма
+  // «По спец.» и «Не по спец.» = «Всего трудоустроены».
+  var headers = ['Направление', 'Уровень', 'Студентов',
+                 'По спец.', 'Не по спец.', 'Всего трудоустр.',
+                 'Прогноз трудоустройства'];
   thead.innerHTML = headers.map(function(h){ return '<th>' + escHtml(h) + '</th>'; }).join('');
   tbody.innerHTML = records.map(function(r){
     var pct = Math.round((r.probability || 0) * 100);
-    var emp = (typeof r.fact_emp_pct === 'number') ? r.fact_emp_pct : 0;
-    var spc = (typeof r.fact_spec_pct === 'number') ? r.fact_spec_pct : 0;
-    var empColor = emp >= 75 ? 'var(--success)' : emp >= 50 ? 'var(--accent)' : '#c0392b';
-    var spcColor = spc >= 60 ? 'var(--success)' : spc >= 40 ? 'var(--accent)' : '#c0392b';
+    var emp     = (typeof r.fact_emp_pct === 'number')      ? r.fact_emp_pct      : 0;
+    var spec    = (typeof r.fact_spec_pct === 'number')     ? r.fact_spec_pct     : 0;
+    var nonSpec = (typeof r.fact_non_spec_pct === 'number') ? r.fact_non_spec_pct : 0;
+    var empColor  = emp  >= 75 ? 'var(--success)' : emp  >= 50 ? 'var(--accent)' : '#c0392b';
+    var specColor = spec >= 30 ? 'var(--success)' : spec >  5  ? 'var(--accent)' : 'var(--muted)';
+    function cell(pct, color, count) {
+      return '<td><span style="color:' + color + ';font-weight:600">' + pct.toFixed(1) + '%</span> '
+           + '<span style="color:var(--muted);font-size:var(--text-xs)">(' + (count || 0) + ')</span></td>';
+    }
     return '<tr>'
       + '<td>' + escHtml(r.direction || '—') + '</td>'
       + '<td>' + escHtml(r.education_level || '—') + '</td>'
       + '<td style="text-align:center"><strong>' + (r.count || 0) + '</strong></td>'
-      + '<td><span style="color:' + empColor + ';font-weight:600">' + emp.toFixed(1) + '%</span> '
-        + '<span style="color:var(--muted);font-size:var(--text-xs)">(' + (r.emp_count || 0) + ')</span></td>'
-      + '<td><span style="color:' + spcColor + ';font-weight:600">' + spc.toFixed(1) + '%</span> '
-        + '<span style="color:var(--muted);font-size:var(--text-xs)">(' + (r.spec_count || 0) + ')</span></td>'
+      + cell(spec,    specColor,    r.spec_count)
+      + cell(nonSpec, 'var(--muted)', r.non_spec_count)
+      + cell(emp,     empColor,    r.emp_count)
       + '<td>' + _riskBadge(pct) + '</td>'
       + '</tr>';
   }).join('');
+}
+
+async function exportRiskGroups() {
+  var threshold = parseInt(document.getElementById('riskThreshold').value) / 100;
+  var hideEmpty = document.getElementById('riskHideEmpty').checked;
+  var btn = document.getElementById('riskExportBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Подготовка...'; }
+  try {
+    var resp = await fetch('/api/export/risk_groups', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        threshold: threshold,
+        top_n: 50,
+        model_name: activeModelName,
+        mode: _riskMode,
+        hide_empty: hideEmpty
+      })
+    });
+    if (!resp.ok) {
+      var msg = 'Ошибка экспорта (' + resp.status + ')';
+      try { var err = await resp.json(); if (err && err.detail) msg += ': ' + err.detail; } catch (e) {}
+      alert(msg);
+      return;
+    }
+    var blob = await resp.blob();
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    var modeTag = (_riskMode === 'group') ? 'group' : 'individual';
+    a.href = url;
+    a.download = 'risk_groups_' + modeTag + '.xlsx';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function() { URL.revokeObjectURL(url); }, 1000);
+  } catch (e) {
+    alert('Не удалось скачать файл: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Скачать .xlsx'; }
+  }
 }
 
 async function loadRiskGroups() {
@@ -3025,8 +3363,54 @@ function handleFile(file) {
   }
 }
 
+// Файлы трудоустройства ИСАУ (2021/2022/2023/2025) имеют несовместимые шапки
+// между годами, поэтому локальная агрегация по first-file headers ломается на
+// 2023/2025. Отправляем такие файлы на /api/ingest — бэкенд распознаёт диалект
+// по сигнатуре, маппит колонки и значения статуса в бинарный target.
+function isEmploymentFile(file) {
+  var name = (file.name || '').toLowerCase();
+  if (!/\.xlsx?$/.test(name)) return false;
+  return /трудоустр|выпускник|employment/.test(name);
+}
+
+async function ingestEmploymentFiles(files) {
+  var fd = new FormData();
+  for (var i = 0; i < files.length; i++) fd.append('files', files[i], files[i].name);
+  try {
+    var resp = await fetch('/api/ingest', { method: 'POST', body: fd, credentials: 'include' });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    var data = await resp.json();
+    if (!data.rows || !data.rows.length) {
+      var fileErrors = (data.meta && data.meta.files || []).map(function(m){
+        return m.file + ': ' + (m.error || 'OK');
+      }).join('\n');
+      alert('Сервер не распознал файлы трудоустройства:\n' + fileErrors);
+      return;
+    }
+    var totalRows = (data.meta && data.meta.total_rows) || (data.rows.length - 1);
+    var label = files.length === 1 ? files[0].name : (files.length + ' xlsx');
+    loadedFiles.push({
+      name: label + ' (ingest: ' + totalRows + ' строк)',
+      rows: data.rows,
+      source: 'Сервер /api/ingest: ' + files.map(function(f){return f.name;}).join(', '),
+      workbook: null,
+      ingestMeta: data.meta,
+    });
+    renderFileList();
+    updateSheetBar();
+    reanalyze();
+  } catch (e) {
+    alert('Не удалось импортировать файлы трудоустройства: ' + e.message);
+  }
+}
+
 function handleFiles(files) {
-  for (var i = 0; i < files.length; i++) handleFile(files[i]);
+  var employment = [], other = [];
+  for (var i = 0; i < files.length; i++) {
+    (isEmploymentFile(files[i]) ? employment : other).push(files[i]);
+  }
+  if (employment.length) ingestEmploymentFiles(employment);
+  for (var j = 0; j < other.length; j++) handleFile(other[j]);
 }
 
 document.getElementById('pickBtn').onclick   = function(){ document.getElementById('fileInput').click(); };
@@ -3037,19 +3421,27 @@ document.getElementById('demoBtn').onclick = async function() {
   btn.disabled = true;
   btn.textContent = 'Загружаю…';
   try {
-    var resp = await fetch('/static/synthetic_10000.xlsx');
+    // Тянем агрегат реальных файлов трудоустройства ИСАУ (2021/2022/2023/2025)
+    // через серверный ingest — фронту не нужно парсить разнородные шапки.
+    var resp = await fetch('/api/demo-employment', { credentials: 'include' });
     if (!resp.ok) throw new Error('HTTP ' + resp.status);
-    var buf = await resp.arrayBuffer();
-    var wb = XLSX.read(new Uint8Array(buf), { type: 'array' });
-    var sheetName = wb.SheetNames[0];
-    var rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, defval: '' });
+    var data = await resp.json();
+    if (!data.rows || !data.rows.length) {
+      var err = (data.meta && data.meta.error) || 'no_rows';
+      throw new Error('сервер не нашёл файлы трудоустройства (' + err + ')');
+    }
+    var totalRows = (data.meta && data.meta.total_rows) || (data.rows.length - 1);
+    var fileNames = ((data.meta && data.meta.files) || [])
+      .filter(function(m){ return m && !m.error; })
+      .map(function(m){ return m.file; });
     loadedFiles = [{
-      name: 'synthetic_10000.xlsx',
-      rows: rows,
-      source: 'Demo: synthetic_10000.xlsx (' + Math.max(0, rows.length - 1) + ' строк)',
-      workbook: wb
+      name: 'Реальные данные ИСАУ (' + totalRows + ' строк)',
+      rows: data.rows,
+      source: 'Demo /api/demo-employment: ' + fileNames.join(', '),
+      workbook: null,
+      ingestMeta: data.meta,
     }];
-    currentWorkbook = wb;
+    currentWorkbook = null;
     renderFileList();
     updateSheetBar();
     reanalyze();

@@ -8,3 +8,5 @@ catboost==1.2.7
 openpyxl==3.1.5
 python-multipart==0.0.20
 requests==2.32.3
+shap==0.46.0
+lime==0.2.0.1
