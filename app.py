@@ -12,6 +12,7 @@ import math as _math
 import re
 import threading
 import time
+import traceback as _tb
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -42,10 +43,10 @@ from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 @asynccontextmanager
 async def lifespan(_app: 'FastAPI'):
-    # Автотренировка на synthetic_10000.xlsx идёт в ФОНОВОМ потоке, чтобы lifespan
-    # не блокировал открытие порта. На Render free CPU 0.1 обучение трёх моделей
-    # занимает ~30-60 сек — дольше таймаута port-scan, если блокировать startup.
-    threading.Thread(target=_autoload_demo, daemon=True, name='autoload-demo').start()
+    # Автотренировка на старте отключена по запросу — данные загружаются
+    # вручную через кнопку «Демо» или /api/ingest. Сама функция _autoload_demo
+    # сохранена ниже; включить обратно — раскомментировать строку:
+    # threading.Thread(target=_autoload_demo, daemon=True, name='autoload-demo').start()
     yield
 
 
@@ -222,37 +223,60 @@ def _compute_shap(model_name: str, row: pd.DataFrame) -> Optional[Dict[str, Any]
     категориальными признаками). Кэшируется по имени модели в _shap_explainers.
     """
     global _shap_explainers
-    if model_name not in _trained or _shap_background is None or len(_shap_background) == 0:
+    if model_name not in _trained:
+        print(f'[shap] модель {model_name!r} не обучена')
         return None
+    if _shap_background is None or len(_shap_background) == 0:
+        print('[shap] фоновая выборка пуста — переобучите модели')
+        return None
+    # Локальная копия — чтобы pyright не ругался на возможный None в замыкании.
+    bg_df = _shap_background
     try:
         import shap  # type: ignore[import-not-found]
     except ImportError:
+        print('[shap] библиотека shap не установлена')
         return None
     pipe = _trained[model_name]
     try:
         classes = list(pipe.classes_)
         if 2 not in classes:
+            print(f'[shap] класс 2 (по специальности) отсутствует в {model_name}')
             return None
         idx2 = classes.index(2)
 
-        # predict-функция: P(y=2) на массиве строк-признаков.
-        # KernelExplainer передаёт numpy-массив; восстановим DataFrame с теми же колонками,
-        # чтобы Pipeline scikit-learn корректно отработал ColumnTransformer.
-        bg_cols = list(_shap_background.columns)
+        # Приводим row к тем же колонкам/типам, что и bg_df, иначе KernelExplainer
+        # может прислать numpy-массив с object-dtype для столбца, который в фоне
+        # был int — pipe сломается на ColumnTransformer.
+        bg_cols = list(bg_df.columns)
+        row_aligned = row.reindex(columns=bg_cols)
+        for c in bg_cols:
+            try:
+                row_aligned[c] = row_aligned[c].astype(bg_df[c].dtype)
+            except Exception:
+                pass  # если dtype не сходится, оставим как есть — pipe сам ругнётся
 
+        # predict-функция: P(y=2) на массиве строк-признаков.
+        # KernelExplainer передаёт numpy-массив; восстановим DataFrame.
         def _predict_proba_spec(X):
             if isinstance(X, np.ndarray):
                 X = pd.DataFrame(X, columns=bg_cols)
+                for c in bg_cols:
+                    try:
+                        X[c] = X[c].astype(bg_df[c].dtype)
+                    except Exception:
+                        pass
             return pipe.predict_proba(X)[:, idx2]
 
         explainer = _shap_explainers.get(model_name)
         if explainer is None:
             # KernelExplainer устойчив к категориальным строкам.
-            explainer = shap.KernelExplainer(_predict_proba_spec, _shap_background)
+            explainer = shap.KernelExplainer(_predict_proba_spec, bg_df)
             _shap_explainers[model_name] = explainer
 
         # Объясняем единственную строку. nsamples — компромисс скорости и точности.
-        sv = explainer.shap_values(row, nsamples=80, silent=True)
+        # Снизили с 80 → 50 для скорости (на Render Free 0.1 CPU 80 семплов могут
+        # давать таймаут > 30 с на первый запрос).
+        sv = explainer.shap_values(row_aligned, nsamples=50, silent=True)
         # sv может быть np.ndarray shape (1, n_features) для бинарного выхода.
         # Если вдруг list — берём первый элемент.
         if isinstance(sv, list):
@@ -262,12 +286,16 @@ def _compute_shap(model_name: str, row: pd.DataFrame) -> Optional[Dict[str, Any]
             vals = sv[0]
         else:
             vals = sv
-        base = float(explainer.expected_value)
-        cols = list(row.columns)
+        # expected_value в новых версиях shap может быть np.ndarray (например,
+        # shape (1,)) даже для одно-выходной функции. float() на массиве — TypeError.
+        ev = explainer.expected_value
+        ev_arr = np.atleast_1d(np.asarray(ev))
+        base = float(ev_arr[0])
+        cols = list(row_aligned.columns)
         feats = [
             {
                 'name': str(c),
-                'feature_value': str(row.iloc[0][c]),
+                'feature_value': str(row_aligned.iloc[0][c]),
                 'shap': float(vals[i]),
             }
             for i, c in enumerate(cols)
@@ -276,7 +304,9 @@ def _compute_shap(model_name: str, row: pd.DataFrame) -> Optional[Dict[str, Any]
         feats.sort(key=lambda f: abs(f['shap']), reverse=True)
         return {'base': base, 'features': feats}
     except Exception as e:
+        # Полный трейсбек в server log — без него не понять, где упало.
         print(f'[shap] _compute_shap failed for {model_name}: {e}')
+        _tb.print_exc()
         return None
 
 
@@ -1889,6 +1919,17 @@ def demo_employment(_: str = Depends(verify_auth)):
     return {'rows': rows, 'meta': meta}
 
 
+@app.get('/api/spec_keywords')
+def spec_keywords(_: str = Depends(verify_auth)):
+    """Возвращает словарь ключевых слов «по специальности» по 6-значному коду ФГОС.
+    Используется фронтом, чтобы зеркалить _is_job_relevant() в JS — корректно
+    маркировать в таблице «Записи выпускников» строки вида «магистратура +
+    работа по специальности» (которые в обучающем target=0, поскольку статус
+    говорит о поступлении в магистратуру, а не о трудоустройстве).
+    """
+    return {'keywords': _DIR_KEYWORDS}
+
+
 @app.post('/api/preprocess')
 def preprocess(payload: TrainPayload, _: str = Depends(verify_auth)):
     processed_rows, meta = preprocess_dataframe(payload.rows)
@@ -2406,15 +2447,30 @@ def risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
             emp_idxs = [len(classes) - 1]  # fallback на последний класс
         probas_raw = proba_matrix[:, emp_idxs].sum(axis=1)
 
+        # «Прогноз по специальности» = P(класс=2). Отдельная вероятность,
+        # которая показывается в group-режиме рядом с общим прогнозом.
+        # Если класса 2 нет в модели (бинарные данные), используем массив нулей —
+        # все группы получат сглаженную оценку, равную глобальному prior_spec=0.
+        if 2 in classes:
+            idx_spec = classes.index(2)
+            probas_spec_raw = proba_matrix[:, idx_spec]
+        else:
+            probas_spec_raw = np.zeros(len(_stored_X_ml))
+
         # Глобальный prior P(трудоустроен) — для сглаживания на малых группах.
         # Раньше брали P(==2), но в бинарных данных это 0, и все группы валились
         # к нулю независимо от модели. Теперь — реальная доля трудоустроенных.
         n_total = int(len(_stored_y))
         n_emp = int((_stored_y > 0).sum())
+        n_spec = int((_stored_y == 2).sum())
         prior_emp = n_emp / n_total if n_total else 0.5
+        # prior P(по специальности): глобальная доля target==2. Для бинарных
+        # данных будет 0 — это валидно: сглаживание тянет малые группы к 0.
+        prior_spec = n_spec / n_total if n_total else 0.0
 
         df = _stored_X.copy()
         df['_proba_raw'] = probas_raw
+        df['_proba_spec_raw'] = probas_spec_raw
         df['_y'] = _stored_y.values
 
         # Маска «пустой анкеты»: все три поля (region, city, job) пустые/«Не указано»
@@ -2458,14 +2514,26 @@ def risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
             agg = pd.DataFrame({
                 'count': grouped.size(),
                 'mean_proba': grouped['_proba_raw'].mean(),
+                'mean_proba_spec': grouped['_proba_spec_raw'].mean(),
                 'emp_count': grouped['_y'].apply(lambda s: int((s > 0).sum())),
                 'spec_count': grouped['_y'].apply(lambda s: int((s == 2).sum())),
             }).reset_index()
 
             agg['non_spec_count'] = (agg['emp_count'] - agg['spec_count']).clip(lower=0)
 
+            # Общий прогноз трудоустройства: сглаживание модельной P(employed)
+            # к глобальной доле трудоустроенных.
             agg['probability'] = agg.apply(
                 lambda r: _smooth(float(r['mean_proba']), prior_emp, int(r['count'])),
+                axis=1
+            )
+            # Прогноз трудоустройства по специальности: отдельное сглаживание
+            # модельной P(класс=2) к глобальной доле работающих по специальности.
+            # Группы с малым count и нулём в данных (напр., 0/24 у Соц. работы)
+            # получат значение, близкое к prior_spec, — но всё равно «низкое»,
+            # т.к. prior_spec обычно сильно ниже prior_emp.
+            agg['probability_spec'] = agg.apply(
+                lambda r: _smooth(float(r['mean_proba_spec']), prior_spec, int(r['count'])),
                 axis=1
             )
 
@@ -2483,6 +2551,7 @@ def risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
                     'non_spec_count': int(r['non_spec_count']),
                     'emp_count': int(r['emp_count']),
                     'probability': round(float(r['probability']), 3),
+                    'probability_spec': round(float(r['probability_spec']), 3),
                     'fact_spec_pct': round(int(r['spec_count']) / cnt * 100, 1) if cnt else 0.0,
                     'fact_non_spec_pct': round(int(r['non_spec_count']) / cnt * 100, 1) if cnt else 0.0,
                     'fact_emp_pct': round(int(r['emp_count']) / cnt * 100, 1) if cnt else 0.0,
@@ -2563,6 +2632,7 @@ def export_risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
 
     from openpyxl import Workbook
     from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
 
     wb = Workbook()
     # Удаляем дефолтный лист и создаём свои — так type-checker видит конкретный Worksheet
@@ -2586,6 +2656,28 @@ def export_risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
         ws_sum.cell(row=r_idx, column=2, value=v)
     ws_sum.column_dimensions['A'].width = 32
     ws_sum.column_dimensions['B'].width = 28
+    # Подсказка: где смотреть расшифровку
+    ws_sum.cell(row=len(summary_rows) + 2, column=1,
+                value='Расшифровка столбцов — на листе «Глоссарий».').font = Font(italic=True)
+
+    # ── Цветовая разметка для P-ячеек (низкий/средний/высокий шанс) ──
+    fill_low  = PatternFill('solid', fgColor='FFCDD2')   # красный — низкий шанс
+    fill_mid  = PatternFill('solid', fgColor='FFE0B2')   # оранжевый — средний
+    fill_high = PatternFill('solid', fgColor='C8E6C9')   # зелёный — высокий
+
+    def _chance_text(p: float) -> str:
+        if p < 0.30:
+            return 'низкий'
+        if p < 0.70:
+            return 'средний'
+        return 'высокий'
+
+    def _chance_fill(p: float):
+        if p < 0.30:
+            return fill_low
+        if p < 0.70:
+            return fill_mid
+        return fill_high
 
     # ── Лист 2: Записи ──
     ws = wb.create_sheet('Записи')
@@ -2593,10 +2685,11 @@ def export_risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
         headers = ['Направление', 'Уровень', 'Студентов',
                    'По спец.', 'Не по спец.', 'Всего трудоустроены',
                    '% по спец.', '% не по спец.', '% трудоустр.',
-                   'P(трудоустр.)']
+                   'P(трудоустр.)', 'Шанс трудоустр.',
+                   'P(по спец.)', 'Шанс по спец.']
     else:
         headers = ['Уровень', 'Направление', 'Регион', 'Город',
-                   'Должности', 'Студентов', 'P(трудоустр.)']
+                   'Должности', 'Студентов', 'P(трудоустр.)', 'Шанс трудоустр.']
     for j, h in enumerate(headers, start=1):
         c = ws.cell(row=1, column=j, value=h)
         c.font = bold
@@ -2606,6 +2699,8 @@ def export_risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
     records: List[Dict[str, Any]] = data.get('records') or []  # type: ignore[assignment]
     for i, rec in enumerate(records, start=2):
         if data.get('mode') == 'group':
+            p_emp = float(rec.get('probability', 0.0) or 0.0)
+            p_spec = float(rec.get('probability_spec', 0.0) or 0.0)
             row = [
                 rec.get('direction', ''),
                 rec.get('education_level', ''),
@@ -2616,9 +2711,20 @@ def export_risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
                 rec.get('fact_spec_pct', 0.0),
                 rec.get('fact_non_spec_pct', 0.0),
                 rec.get('fact_emp_pct', 0.0),
-                rec.get('probability', 0.0),
+                p_emp,
+                _chance_text(p_emp),
+                p_spec,
+                _chance_text(p_spec),
             ]
+            # Колонки 10–11 — P(трудоустр.) и Шанс; 12–13 — P(по спец.) и Шанс
+            for j, val in enumerate(row, start=1):
+                cell = ws.cell(row=i, column=j, value=val)
+                if j in (10, 11):
+                    cell.fill = _chance_fill(p_emp)
+                elif j in (12, 13):
+                    cell.fill = _chance_fill(p_spec)
         else:
+            p_emp = float(rec.get('probability', 0.0) or 0.0)
             row = [
                 rec.get('education_level', ''),
                 rec.get('direction', ''),
@@ -2626,17 +2732,108 @@ def export_risk_groups(payload: RiskPayload, _: str = Depends(verify_auth)):
                 rec.get('city', ''),
                 rec.get('jobs', ''),
                 rec.get('count', 0),
-                rec.get('probability', 0.0),
+                p_emp,
+                _chance_text(p_emp),
             ]
-        for j, val in enumerate(row, start=1):
-            ws.cell(row=i, column=j, value=val)
+            for j, val in enumerate(row, start=1):
+                cell = ws.cell(row=i, column=j, value=val)
+                if j in (7, 8):
+                    cell.fill = _chance_fill(p_emp)
 
-    widths_group = [38, 16, 12, 14, 14, 14, 14, 14, 14, 14]
-    widths_indiv = [16, 38, 22, 18, 50, 12, 14]
+    widths_group = [38, 16, 12, 14, 14, 14, 14, 14, 14, 14, 16, 14, 16]
+    widths_indiv = [16, 38, 22, 18, 50, 12, 14, 16]
     widths = widths_group if data.get('mode') == 'group' else widths_indiv
     for j, w in enumerate(widths, start=1):
-        ws.column_dimensions[chr(ord('A') + j - 1)].width = w
+        ws.column_dimensions[get_column_letter(j)].width = w
     ws.freeze_panes = 'A2'
+
+    # ── Лист 3: Глоссарий ──
+    ws_g = wb.create_sheet('Глоссарий')
+    intro_lines = [
+        ('Группы риска — что это', True),
+        ('Список направлений (или индивидуальных групп) с прогнозируемой '
+         'вероятностью трудоустройства ниже выбранного порога. Прогноз делается '
+         'ансамблем моделей (LogisticRegression, LightGBM, CatBoost) с '
+         'изотонической калибровкой вероятностей. Для устойчивости '
+         'вероятности сглаживаются по байесовской формуле к глобальной '
+         'средней по выборке.', False),
+        ('', False),
+        ('Формула сглаживания', True),
+        ('P_final = w · P_model + (1 − w) · P_prior,    w = count / (count + 10),    N₀ = 10', False),
+        ('Здесь P_model — сырой прогноз модели для группы; P_prior — глобальная '
+         'базовая частота (≈ 0.64 для общей занятости, ≈ 0.27 для занятости по '
+         'специальности); count — число студентов в группе. Чем меньше группа, '
+         'тем сильнее прогноз тянется к базовой частоте.', False),
+        ('', False),
+        ('Цветовая разметка', True),
+        ('Зелёный фон — высокий шанс (≥ 70 %), оранжевый — средний (30–69 %), '
+         'красный — низкий (< 30 %). Окрашиваются ячейки P(трудоустр.), '
+         'Шанс трудоустр., P(по спец.), Шанс по спец.', False),
+        ('', False),
+    ]
+    r = 1
+    for txt, is_header in intro_lines:
+        cell = ws_g.cell(row=r, column=1, value=txt)
+        cell.alignment = Alignment(wrap_text=True, vertical='top')
+        if is_header:
+            cell.font = Font(bold=True, size=12)
+        ws_g.merge_cells(start_row=r, start_column=1, end_row=r, end_column=2)
+        r += 1
+
+    # Таблица колонок
+    glossary_rows = [
+        ('Колонка', 'Описание', True),
+        ('Направление', 'ФГОС-код и название направления подготовки.', False),
+        ('Уровень', 'Уровень образования: бакалавриат / магистратура / специалитет.', False),
+        ('Студентов', 'Число выпускников с такой парой (направление + уровень) в загруженной выборке.', False),
+        ('По спец.', 'Фактическое число выпускников, работающих по специальности (target = 2 — должность матчит ключевые слова ФГОС-словаря направления).', False),
+        ('Не по спец.', 'Фактическое число выпускников, работающих НЕ по специальности (target = 1).', False),
+        ('Всего трудоустроены', '«По спец.» + «Не по спец.» — суммарное число трудоустроенных.', False),
+        ('% по спец.', 'Доля «По спец.» от «Студентов», умноженная на 100. Факт из обучающих данных.', False),
+        ('% не по спец.', 'Доля «Не по спец.» от «Студентов», умноженная на 100. Факт.', False),
+        ('% трудоустр.', 'Доля «Всего трудоустроены» от «Студентов», умноженная на 100. Факт.', False),
+        ('P(трудоустр.)',
+         'ПРОГНОЗ модели: вероятность того, что новый выпускник этой группы трудоустроится '
+         '— на любую работу (по специальности ИЛИ не по специальности). '
+         'Базовая частота prior_emp ≈ 0.64 (глобальная доля трудоустроенных по всей выборке). '
+         'Значение сглажено: для малых групп тянется к prior_emp.', False),
+        ('Шанс трудоустр.',
+         'Текстовая оценка P(трудоустр.):  низкий (< 30 %),  средний (30–69 %),  высокий (≥ 70 %).', False),
+        ('P(по спец.)',
+         'ПРОГНОЗ модели: вероятность того, что выпускник этой группы трудоустроится '
+         'ИМЕННО ПО СПЕЦИАЛЬНОСТИ. Базовая частота prior_spec ≈ 0.27 (глобальная доля занятых по спец.). '
+         'Сглажено к prior_spec для малых групп. Учитывает: профиль студента + соответствие '
+         'возможной должности ключевым словам ФГОС.', False),
+        ('Шанс по спец.',
+         'Текстовая оценка P(по спец.):  низкий (< 30 %),  средний (30–69 %),  высокий (≥ 70 %).', False),
+        ('Регион / Город / Должности',
+         'Только в индивидуальном режиме: разбивка по гео и наблюдаемые в выборке должности.', False),
+        ('', '', False),
+        ('Различие факт. % и P(…)',
+         '«% по спец.» / «% трудоустр.» — фактические доли, посчитанные по обучающим данным. '
+         '«P(по спец.)» / «P(трудоустр.)» — прогноз модели для нового выпускника с таким профилем: '
+         'откалиброванный, со сглаживанием. Для группы с большим count они близки; для малой — '
+         'P(…) тянется к глобальной базовой частоте.', False),
+        ('Когда использовать какую колонку',
+         'Для отчётности о прошлых выпусках — факт. колонки («%»). Для оценки рисков нового набора '
+         'и формирования списка приоритетных направлений сопровождения — прогнозные («P(…)»).', False),
+    ]
+    for k, v, is_header in glossary_rows:
+        cell_k = ws_g.cell(row=r, column=1, value=k)
+        cell_v = ws_g.cell(row=r, column=2, value=v)
+        cell_k.alignment = Alignment(wrap_text=True, vertical='top')
+        cell_v.alignment = Alignment(wrap_text=True, vertical='top')
+        if is_header:
+            cell_k.font = bold
+            cell_v.font = bold
+            cell_k.fill = header_fill
+            cell_v.fill = header_fill
+        else:
+            cell_k.font = Font(bold=True)
+        r += 1
+
+    ws_g.column_dimensions['A'].width = 32
+    ws_g.column_dimensions['B'].width = 95
 
     buf = _io.BytesIO()
     wb.save(buf)
