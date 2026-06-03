@@ -825,21 +825,28 @@ var preprocessState = { enabled: true, normalization: 'minmax', lastMeta: null }
 
 var runtimeDashboardData = null;
 
-// ── Словарь ключевых слов «по специальности» (FГОС) ─────────────────
-// Подгружается асинхронно с /api/spec_keywords. Используется в таблице
-// «Записи выпускников» — там, где target=0 в обучении (статус «Поступил в
-// магистратуру»), но в анкете указана должность, релевантная направлению,
-// мы показываем «По специальности (учёба)» вместо «Не трудоустроен».
-// Метки обучения моделей при этом НЕ меняются.
+// ── Логика «по специальности» для отображения бейджей ───────────────
+// Зеркалит backend (/api/spec_keywords): keyword-словарь ФГОС + категорийный
+// матчинг (должность↔направление) + маркеры «не-должности». Используется в
+// таблице «Записи выпускников» для строк «учёба + работа» (target=0 в обучении,
+// т.к. статус «Поступил в магистратуру»). Метки обучения НЕ меняются.
 var DIR_KEYWORDS = null;
+var JOB_CAT_RULES = null;        // [[категория, [ключи]], ...]
+var DIRECTION_CATEGORIES = null; // { '01': 'ИТ', ... }
+var CATEGORY_COMPAT = null;      // { 'ИТ': ['ИТ'], ... }
+var NON_JOB_MARKERS = [];        // ['вс рф', 'декрет', ...]
 (function loadSpecKeywords() {
   fetch('/api/spec_keywords', { credentials: 'include' })
     .then(function(r){ return r.ok ? r.json() : null; })
     .then(function(d){
       if (d && d.keywords) {
         DIR_KEYWORDS = d.keywords;
-        // Перерисовываем таблицу записей, если на момент загрузки KW
-        // данные уже подгружены — иначе badge посчитан с DIR_KEYWORDS=null.
+        JOB_CAT_RULES = d.job_cat_rules || null;
+        DIRECTION_CATEGORIES = d.direction_categories || null;
+        CATEGORY_COMPAT = d.category_compat || null;
+        NON_JOB_MARKERS = d.non_job_markers || [];
+        // Перерисовываем таблицу записей, если данные уже подгружены —
+        // иначе badge посчитан со старым (пустым) словарём.
         if (typeof applyDetailFilters === 'function' && detailReviewData) {
           try { applyDetailFilters(); } catch(_) {}
         }
@@ -851,10 +858,8 @@ var DIR_KEYWORDS = null;
 function getDirectionKeywords(direction) {
   if (!DIR_KEYWORDS || !direction) return [];
   var s = String(direction).trim();
-  // Полный 6-значный код XX.XX.XX
   var m = s.match(/^(\d{2}\.\d{2}\.\d{2})/);
   if (m && DIR_KEYWORDS[m[1]]) return DIR_KEYWORDS[m[1]];
-  // Fallback: union по 2-значному префиксу (как в _get_direction_keywords)
   var m2 = s.match(/^(\d{2})\./);
   if (m2) {
     var prefix = m2[1] + '.';
@@ -872,13 +877,55 @@ function getDirectionKeywords(direction) {
   return [];
 }
 
+// Зеркало _classify_job: должность → категория (первое совпадение).
+function classifyJob(title) {
+  if (!JOB_CAT_RULES || !title) return 'Другое';
+  var t = String(title).trim().toLowerCase().replace(/ё/g, 'е');
+  for (var i = 0; i < JOB_CAT_RULES.length; i++) {
+    var cat = JOB_CAT_RULES[i][0], kws = JOB_CAT_RULES[i][1];
+    for (var j = 0; j < kws.length; j++) {
+      if (t.indexOf(kws[j]) !== -1) return cat;
+    }
+  }
+  return 'Другое';
+}
+
+// Зеркало _get_direction_category: направление → категория по 2-значному префиксу.
+function getDirectionCategory(direction) {
+  if (!DIRECTION_CATEGORIES || !direction) return 'Другое';
+  var m = String(direction).trim().match(/^(\d{2})\./);
+  if (m && DIRECTION_CATEGORIES[m[1]]) return DIRECTION_CATEGORIES[m[1]];
+  return 'Другое';
+}
+
+// Должность не является работой (армия/декрет/учёба/безработица)?
+function isNonJob(jobTitle) {
+  if (!jobTitle) return true;
+  var t = String(jobTitle).trim().toLowerCase().replace(/ё/g, 'е');
+  if (!t || t === '-' || t === '—' || t === 'nan' || t === 'не указано') return true;
+  for (var i = 0; i < NON_JOB_MARKERS.length; i++) {
+    if (t.indexOf(NON_JOB_MARKERS[i]) !== -1) return true;
+  }
+  return false;
+}
+
+// Зеркало _is_job_relevant_display: keyword ИЛИ совместимость категорий.
 function isJobRelevant(jobTitle, direction) {
   if (!jobTitle || !direction) return false;
-  var keywords = getDirectionKeywords(direction);
-  if (!keywords.length) return false; // словарь не загружен или направление неизвестно — без зеркальной маркировки
   var t = String(jobTitle).trim().toLowerCase().replace(/ё/g, 'е');
+  // 1) keyword-словарь направления
+  var keywords = getDirectionKeywords(direction);
   for (var i = 0; i < keywords.length; i++) {
     if (t.indexOf(keywords[i]) !== -1) return true;
+  }
+  // 2) категорийный матчинг
+  if (CATEGORY_COMPAT) {
+    var jobCat = classifyJob(jobTitle);
+    if (jobCat !== 'Другое') {
+      var dirCat = getDirectionCategory(direction);
+      var compat = CATEGORY_COMPAT[dirCat] || [];
+      if (compat.indexOf(jobCat) !== -1) return true;
+    }
   }
   return false;
 }
@@ -1539,7 +1586,9 @@ function _detailRecordsTable(filtered) {
     // матчит ФГОС-словарь направления — показываем «По специальности (учёба)»;
     // если должность есть, но не матчит — «Не по специальности (учёба)». Метки
     // обучения моделей при этом НЕ меняются.
-    var hasJob = x.job && x.job !== 'Не указано' && String(x.job).trim() !== '' && String(x.job).trim() !== '—';
+    // hasJob исключает «не-должности»: армия (ВС РФ), декрет, «поступил в
+    // магистратуру» и т.п. — они не считаются работой, даже если попали в поле.
+    var hasJob = x.job && !isNonJob(x.job);
     if (x.target === 1)      { statusLabel = 'По специальности';     color = '#2e7d57'; }
     else if (x.target === 0) { statusLabel = 'Не по специальности';  color = '#e67e22'; }
     else if (hasJob) {
